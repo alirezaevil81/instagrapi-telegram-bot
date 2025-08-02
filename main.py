@@ -10,6 +10,7 @@ from functools import wraps
 
 from instagrapi import Client
 from instagrapi.exceptions import LoginRequired, MediaNotFound, UserNotFound, BadPassword, TwoFactorRequired
+from instagrapi.types import Media, UserShort
 
 from telegram import Update, ReplyKeyboardRemove, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -51,10 +52,13 @@ except ValueError:
 
 
 # تعریف مراحل مکالمه برای خوانایی بهتر
-# مکالمه ورود
-LOGIN_GET_USERNAME, LOGIN_HANDLE_SESSION, LOGIN_GET_PASSWORD, LOGIN_HANDLE_2FA, LOGIN_GET_2FA_CODE = range(5)
-# مکالمه تنظیمات لایک
-LIKING_GET_DELAY, LIKING_GET_COUNT, LIKING_GET_SLEEP = range(5, 8)
+(LOGIN_GET_USERNAME, LOGIN_HANDLE_SESSION, LOGIN_GET_PASSWORD, 
+ LOGIN_HANDLE_2FA, LOGIN_GET_2FA_CODE) = range(5)
+
+(POST_LIKING_GET_POST_COUNT, POST_LIKING_GET_DELAY, POST_LIKING_GET_SLEEP) = range(5, 8)
+
+(FOLLOWING_GET_USER_COUNT, FOLLOWING_GET_POST_COUNT, 
+ FOLLOWING_GET_DELAY, FOLLOWING_GET_SLEEP) = range(8, 12)
 
 
 # --- Decorator برای محدود کردن دسترسی به ادمین ---
@@ -70,13 +74,6 @@ def admin_only(func):
 
 
 # --- توابع کمکی ---
-def get_session_path_by_username(context: ContextTypes.DEFAULT_TYPE) -> str:
-    """مسیر فایل session را بر اساس نام کاربری اینستاگرام برمی‌گرداند."""
-    username = context.user_data.get('instagram_username')
-    if username:
-        return os.path.join('sessions', f"{username}.json")
-    return None
-
 def get_session_path_by_chat_id(context: ContextTypes.DEFAULT_TYPE) -> str:
     """مسیر فایل session را بر اساس شناسه چت تلگرام کاربر برمی‌گرداند."""
     chat_id = context.user_data.get('chat_id')
@@ -100,14 +97,13 @@ async def _perform_login(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     client = Client()
     try:
-        # اجرای ورود در یک رشته جداگانه برای جلوگیری از بلاک شدن
         await asyncio.to_thread(client.login, username_input, password, verification_code=verification_code)
         
         context.user_data['client'] = client
         session_path = get_session_path_by_chat_id(context)
         client.dump_settings(session_path)
         
-        await msg.edit_text(f"✅ ورود با موفقیت انجام شد!\n\n🎉 خوش آمدید <b>{client.username}</b>.\nاکنون آماده دریافت لینک پست‌ها هستید.", parse_mode='HTML')
+        await msg.edit_text(f"✅ ورود با موفقیت انجام شد!\n\n🎉 خوش آمدید <b>{client.username}</b>.\nاکنون آماده شروع عملیات هستید.", parse_mode='HTML')
         return ConversationHandler.END
 
     except BadPassword:
@@ -129,14 +125,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data['chat_id'] = update.effective_chat.id
     welcome_message = (
         f"👋 سلام <b>{user.mention_html()}</b>\n\n"
-        "به ربات پیشرفته لایکر اینستاگرام خوش آمدید. برای شروع، لطفاً از دستورات زیر استفاده کنید:\n\n"
+        "به ربات پیشرفته اینستاگرام خوش آمدید.\n\n"
         "<b>دستورات اصلی:</b>\n"
+        "/like_following - 👥 لایک کردن پست‌های دنبال‌شوندگان\n"
         "/login - 🔑 ورود به حساب اینستاگرام\n"
         "/logout - 🚪 خروج از حساب فعلی\n"
         "/status - 📊 مشاهده وضعیت عملیات\n"
-        "/cancel - 🛑 لغو مکالمه (مثل ورود یا تنظیمات)\n"
-        "/cancel_liking - ✋ لغو فرآیند لایک در حال اجرا\n\n"
-        "<i>می‌توانید با ارسال یک یا چند لینک پست (جدا شده با کاما) فرآیند لایک را شروع کنید.</i>\n\n"
+        "/cancel - 🛑 لغو عملیات فعلی\n\n"
+        "<i>برای لایک کردن لایک‌کنندگان یک پست، کافیست لینک آن را ارسال کنید.</i>\n\n"
         "ℹ️ همچنین می‌توانید از منوی دستورات (دکمه /) برای دسترسی سریع‌تر استفاده کنید."
     )
     await update.message.reply_html(welcome_message)
@@ -158,7 +154,7 @@ async def login_get_username(update: Update, context: ContextTypes.DEFAULT_TYPE)
     """نام کاربری را دریافت و وجود session را بررسی می‌کند."""
     username = update.message.text.strip().lower()
     context.user_data['instagram_username'] = username
-    session_path = get_session_path_by_username(context)
+    session_path = os.path.join('sessions', f"{username}.json")
 
     if os.path.exists(session_path):
         keyboard = [[InlineKeyboardButton("✔️ بله، با Session وارد شو", callback_data='session_yes'), InlineKeyboardButton("✖️ خیر، با رمز عبور", callback_data='session_no')]]
@@ -175,7 +171,7 @@ async def login_handle_session_choice(update: Update, context: ContextTypes.DEFA
     await query.answer()
     
     if query.data == 'session_yes':
-        session_path = get_session_path_by_username(context)
+        session_path = os.path.join('sessions', context.user_data.get('instagram_username') + ".json")
         client = Client()
         try:
             await asyncio.to_thread(client.load_settings, session_path)
@@ -256,37 +252,41 @@ async def handle_logout_confirmation(update: Update, context: ContextTypes.DEFAU
 @admin_only
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """وضعیت فعلی فرآیند لایک را نمایش می‌دهد."""
-    if not context.user_data.get('is_liking', False):
+    job = context.user_data.get('liking_job')
+    if not job or not job.get('is_running'):
         await update.message.reply_text("💤 در حال حاضر هیچ فرآیند لایکی در حال اجرا نیست.")
         return
 
-    total = context.user_data.get('total_public_users', 0)
-    processed = context.user_data.get('processed_users', 0)
-    start_time = context.user_data.get('start_time', 0)
+    liking_mode = job.get('mode', 'نامشخص')
+    title = "لایک از پست" if liking_mode == 'post_likers' else "لایک دنبال‌شوندگان"
+    
+    total = job.get('total_items', 0)
+    processed = job.get('processed_items', 0)
+    start_time = job.get('start_time', 0)
     
     elapsed_time = time.monotonic() - start_time
     
     eta_str = "نامشخص"
     if processed > 0:
-        avg_time_per_user = elapsed_time / processed
-        remaining_users = total - processed
-        eta_seconds = remaining_users * avg_time_per_user
+        avg_time_per_item = elapsed_time / processed
+        remaining_items = total - processed
+        eta_seconds = remaining_items * avg_time_per_item
         eta_str = time.strftime("%H:%M:%S", time.gmtime(eta_seconds))
 
-    last_status_raw = context.user_data.get('last_like_status', 'نامشخص')
+    last_status_raw = job.get('last_status', 'نامشخص')
     last_status_escaped = html.escape(last_status_raw)
     
     percentage = (processed / total) * 100 if total > 0 else 0
 
     status_message = (
-        f"📊 <b>وضعیت فرآیند لایک</b>\n\n"
-        f"👥 کاربران: <b>{processed}</b> از <b>{total}</b>\n"
+        f"📊 <b>وضعیت {title}</b>\n\n"
+        f"👥 کاربران بررسی شده: <b>{processed}</b> از <b>{total}</b>\n"
         f"📈 درصد پیشرفت: <b>{percentage:.2f}%</b>\n"
         f"⏳ زمان سپری شده: <b>{time.strftime('%H:%M:%S', time.gmtime(elapsed_time))}</b>\n"
         f"⏱️ تخمین زمان باقی‌مانده (ETA): <b>{eta_str}</b>\n\n"
-        f"❤️‍🔥 لایک‌های موفق: <b>{context.user_data.get('total_likes_done', 0)}</b>\n"
-        f"🟡 از قبل لایک شده: <b>{context.user_data.get('already_liked_count', 0)}</b>\n"
-        f"❌ خطاها: <b>{context.user_data.get('errors_encountered', 0)}</b>\n\n"
+        f"❤️‍🔥 لایک‌های جدید: <b>{job.get('likes_done', 0)}</b>\n"
+        f"🟡 از قبل لایک شده: <b>{job.get('already_liked', 0)}</b>\n"
+        f"❌ خطاها: <b>{job.get('errors', 0)}</b>\n\n"
         f"<b>آخرین عملیات:</b>\n<code>{last_status_escaped}</code>"
     )
     await update.message.reply_html(status_message)
@@ -296,68 +296,68 @@ async def liking_task(context: ContextTypes.DEFAULT_TYPE) -> None:
     """وظیفه پس‌زمینه که حلقه لایک کردن را اجرا می‌کند."""
     chat_id = context.user_data['chat_id']
     cl = context.user_data['client']
-    public_users = context.user_data['public_users']
-    likes_per_user = context.user_data['likes_per_user']
-    sleep_range = context.user_data['sleep_range']
+    job = context.user_data['liking_job']
     
-    cl.delay_range = context.user_data['delay_range']
+    users_to_process = job['users_to_process']
+    posts_per_user = job['config']['posts_per_user']
+    sleep_range = job['config']['sleep_range']
+    
+    cl.delay_range = job['config']['delay_range']
 
     try:
-        for user in public_users:
-            if not context.user_data.get('is_liking', False):
+        job['total_items'] = len(users_to_process)
+
+        for user in users_to_process:
+            if not job.get('is_running', False):
                 await context.bot.send_message(chat_id, "🛑 عملیات لایک توسط شما لغو شد.")
                 break
             
             try:
-                user_medias = await asyncio.to_thread(cl.user_medias, user.pk, amount=likes_per_user)
+                user_medias = await asyncio.to_thread(cl.user_medias, user.pk, amount=posts_per_user)
                 if not user_medias:
-                    context.user_data['last_like_status'] = f"ℹ️ اطلاعات: کاربر {user.username} پستی برای لایک نداشت."
+                    job['last_status'] = f"ℹ️ اطلاعات: کاربر {user.username} پستی برای لایک نداشت."
                     continue
 
                 for media in user_medias:
                     if media.has_liked:
-                        context.user_data['already_liked_count'] += 1
-                        context.user_data['last_like_status'] = f"🟡 قبلاً لایک شده: پست کاربر {user.username}"
-                        logger.info(f"پست کاربر {user.username} ({media.code}) قبلاً لایک شده بود.")
+                        job['already_liked'] += 1
+                        job['last_status'] = f"🟡 قبلاً لایک شده: پست کاربر {media.user.username}"
                         continue
 
                     await asyncio.to_thread(cl.media_like, media.pk)
-                    context.user_data['total_likes_done'] += 1
-                    context.user_data['last_like_status'] = f"❤️‍🔥 موفق: پست کاربر {user.username} لایک شد."
-                    logger.info(f"پست کاربر {user.username} لایک شد.")
+                    job['likes_done'] += 1
+                    job['last_status'] = f"❤️‍🔥 موفق: پست کاربر {media.user.username} لایک شد."
                     await asyncio.sleep(random.uniform(sleep_range[0], sleep_range[1]))
 
-            except (UserNotFound, Exception) as e:
-                context.user_data['errors_encountered'] += 1
+            except Exception as e:
+                job['errors'] += 1
                 logger.warning(f"خطا در پردازش کاربر {user.username}: {e}")
                 error_summary = str(e).split('\n')[0]
-                context.user_data['last_like_status'] = f"❌ خطا در پردازش کاربر {user.username}: {error_summary}"
+                job['last_status'] = f"❌ خطا در پردازش کاربر {user.username}: {error_summary}"
             finally:
-                context.user_data['processed_users'] += 1
+                job['processed_items'] += 1
         
-        if context.user_data.get('is_liking', False):
+        if job.get('is_running', False):
             final_report = (
                 f"🎉 <b>گزارش نهایی عملیات</b> 🎉\n\n"
-                f"تعداد کل کاربران عمومی: <b>{context.user_data['total_public_users']}</b>\n"
-                f"❤️‍🔥 لایک‌های موفق: <b>{context.user_data['total_likes_done']}</b>\n"
-                f"🟡 از قبل لایک شده: <b>{context.user_data['already_liked_count']}</b>\n"
-                f"❌ خطاها: <b>{context.user_data['errors_encountered']}</b>"
+                f"تعداد کل کاربران بررسی شده: <b>{job['total_items']}</b>\n"
+                f"❤️‍🔥 لایک‌های موفق: <b>{job['likes_done']}</b>\n"
+                f"🟡 از قبل لایک شده: <b>{job['already_liked']}</b>\n"
+                f"❌ خطاها: <b>{job['errors']}</b>"
             )
             await context.bot.send_message(chat_id, final_report, parse_mode='HTML')
 
     except Exception as e:
         logger.error(f"خطای جدی در وظیفه پس‌زمینه لایک: {e}")
-        await context.bot.send_message(chat_id, f"🚨 یک خطای جدی در وظیفه پس‌زمینه رخ داد: {e}")
+        await context.bot.send_message(chat_id, f"🚨 یک خطای جدی در وظیفه لایک رخ داد: {e}")
     finally:
-        context.user_data['is_liking'] = False
-        for key in ['public_users', 'delay_range', 'likes_per_user', 'sleep_range', 'start_time']:
-            if key in context.user_data:
-                del context.user_data[key]
+        if 'liking_job' in context.user_data:
+            del context.user_data['liking_job']
 
 @admin_only
-async def liking_setup_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """شروع مکالمه برای تنظیمات لایک."""
-    if context.user_data.get('is_liking', False):
+async def liking_from_post_setup_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """شروع مکالمه برای تنظیمات لایک از پست."""
+    if context.user_data.get('liking_job', {}).get('is_running'):
         await update.message.reply_text("⏳ یک فرآیند لایک دیگر در حال اجراست.")
         return ConversationHandler.END
 
@@ -375,67 +375,66 @@ async def liking_setup_start(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not valid_urls:
         return
     
-    context.user_data['post_urls'] = valid_urls
+    context.user_data['liking_job_config'] = {'post_urls': valid_urls}
     await update.message.reply_text(
         f"✅ <b>{len(valid_urls)}</b> لینک معتبر شناسایی شد.\n\n"
         "⚙️ لطفاً تنظیمات زیر را مشخص کنید:\n\n"
         "<b>مرحله ۱ از ۳:</b>\n"
-        "⏱️ محدوده تاخیر بین درخواست‌ها را وارد کنید (مثال: <code>5,10</code>).\n"
-        "<i>این تنظیم برای جلوگیری از بلاک شدن مهم است.</i>\n\n"
+        "🔢 چه تعداد از آخرین پست‌های هر کاربر لایک شود؟ (مثال: <code>1</code>)\n\n"
         "برای لغو، روی /cancel کلیک کنید.",
         parse_mode='HTML'
     )
-    return LIKING_GET_DELAY
+    return POST_LIKING_GET_POST_COUNT
 
-async def liking_get_delay(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def liking_from_post_get_post_count(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """تعداد پست‌ها برای هر کاربر را دریافت می‌کند."""
+    try:
+        count = int(update.message.text.strip())
+        if count <= 0: raise ValueError
+        context.user_data['liking_job_config']['posts_per_user'] = count
+        await update.message.reply_text(
+            "👍 بسیار خب.\n\n"
+            "<b>مرحله ۲ از ۳:</b>\n"
+            "⏱️ محدوده تاخیر بین درخواست‌ها را وارد کنید (مثال: <code>2,5</code>):\n\n"
+            "برای لغو، روی /cancel کلیک کنید.",
+            parse_mode='HTML'
+        )
+        return POST_LIKING_GET_DELAY
+    except ValueError:
+        await update.message.reply_text("❌ لطفاً یک عدد صحیح و مثبت وارد کنید.")
+        return POST_LIKING_GET_POST_COUNT
+
+async def liking_from_post_get_delay(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """محدوده تاخیر را دریافت می‌کند."""
     try:
         parts = [int(p.strip()) for p in update.message.text.split(',')]
         if len(parts) != 2: raise ValueError
-        context.user_data['delay_range'] = [min(parts), max(parts)]
-        await update.message.reply_text(
-            "👍 بسیار خب.\n\n"
-            "<b>مرحله ۲ از ۳:</b>\n"
-            "🔢 حالا تعداد پست‌هایی که از هر کاربر لایک شود را وارد کنید (مثال: <code>1</code>):\n\n"
-            "برای لغو، روی /cancel کلیک کنید.",
-            parse_mode='HTML'
-        )
-        return LIKING_GET_COUNT
-    except (ValueError, IndexError):
-        await update.message.reply_text("❌ ورودی نامعتبر است. لطفاً دو عدد را با کاما جدا کنید (مثال: <code>5,10</code>).", parse_mode='HTML')
-        return LIKING_GET_DELAY
-
-async def liking_get_count(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """تعداد لایک برای هر کاربر را دریافت می‌کند."""
-    try:
-        count = int(update.message.text.strip())
-        if count <= 0: raise ValueError
-        context.user_data['likes_per_user'] = count
+        context.user_data['liking_job_config']['delay_range'] = [min(parts), max(parts)]
         await update.message.reply_text(
             "👍 عالی!\n\n"
             "<b>مرحله ۳ از ۳:</b>\n"
-            "😴 در آخر، محدوده زمان انتظار (به ثانیه) بعد از هر لایک را وارد کنید (مثال: <code>10,20</code>):\n\n"
+            "😴 در آخر، محدوده زمان انتظار (به ثانیه) بعد از هر لایک را وارد کنید (مثال: <code>5,15</code>):\n\n"
             "برای لغو، روی /cancel کلیک کنید.",
             parse_mode='HTML'
         )
-        return LIKING_GET_SLEEP
-    except ValueError:
-        await update.message.reply_text("❌ لطفاً یک عدد صحیح و مثبت وارد کنید.")
-        return LIKING_GET_COUNT
+        return POST_LIKING_GET_SLEEP
+    except (ValueError, IndexError):
+        await update.message.reply_text("❌ ورودی نامعتبر است. لطفاً دو عدد را با کاما جدا کنید (مثال: <code>2,5</code>).", parse_mode='HTML')
+        return POST_LIKING_GET_DELAY
 
-async def liking_get_sleep_and_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """محدوده خواب را دریافت و فرآیند اصلی را شروع می‌کند."""
+async def liking_from_post_get_sleep_and_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """محدوده خواب را دریافت و فرآیند لایک را شروع می‌کند."""
     try:
         parts = [int(p.strip()) for p in update.message.text.split(',')]
         if len(parts) != 2: raise ValueError
-        context.user_data['sleep_range'] = [min(parts), max(parts)]
+        context.user_data['liking_job_config']['sleep_range'] = [min(parts), max(parts)]
     except (ValueError, IndexError):
-        await update.message.reply_text("❌ ورودی نامعتبر است. لطفاً دو عدد را با کاما جدا کنید (مثال: <code>10,20</code>).", parse_mode='HTML')
-        return LIKING_GET_SLEEP
+        await update.message.reply_text("❌ ورودی نامعتبر است. لطفاً دو عدد را با کاما جدا کنید (مثال: <code>5,15</code>).", parse_mode='HTML')
+        return POST_LIKING_GET_SLEEP
 
     chat_id = update.effective_chat.id
     cl = context.user_data['client']
-    urls = context.user_data['post_urls']
+    urls = context.user_data['liking_job_config']['post_urls']
     msg = await context.bot.send_message(chat_id, f"⏳ در حال پردازش <b>{len(urls)}</b> لینک... لطفاً صبر کنید.", parse_mode='HTML')
     
     try:
@@ -451,15 +450,18 @@ async def liking_get_sleep_and_start(update: Update, context: ContextTypes.DEFAU
 
         public_users = [user for user in all_likers.values() if not user.is_private]
         
-        context.user_data['is_liking'] = True
-        context.user_data['total_public_users'] = len(public_users)
-        context.user_data['processed_users'] = 0
-        context.user_data['total_likes_done'] = 0
-        context.user_data['already_liked_count'] = 0
-        context.user_data['errors_encountered'] = 0
-        context.user_data['start_time'] = time.monotonic()
-        context.user_data['last_like_status'] = "فرآیند هنوز شروع نشده است."
-        context.user_data['public_users'] = public_users
+        context.user_data['liking_job'] = {
+            'is_running': True,
+            'mode': 'post_likers',
+            'processed_items': 0,
+            'total_likes_done': 0,
+            'already_liked': 0,
+            'errors': 0,
+            'start_time': time.monotonic(),
+            'last_status': "در حال آماده‌سازی...",
+            'users_to_process': public_users,
+            'config': context.user_data.pop('liking_job_config')
+        }
 
         await msg.edit_text(f"🚀 تعداد کاربران عمومی: <b>{len(public_users)}</b>. شروع فرآیند لایک...\nبرای لغو از /cancel_liking استفاده کنید.", parse_mode='HTML')
         asyncio.create_task(liking_task(context))
@@ -477,6 +479,108 @@ async def liking_get_sleep_and_start(update: Update, context: ContextTypes.DEFAU
         return ConversationHandler.END
 
 @admin_only
+async def liking_following_setup_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """شروع مکالمه برای تنظیمات لایک دنبال‌شوندگان."""
+    if context.user_data.get('liking_job', {}).get('is_running'):
+        await update.message.reply_text("⏳ یک فرآیند لایک دیگر در حال اجراست.")
+        return ConversationHandler.END
+
+    if 'client' not in context.user_data:
+        await update.message.reply_text("🔒 شما هنوز وارد حساب اینستاگرام خود نشده‌اید. لطفاً ابتدا از دستور /login استفاده کنید.")
+        return ConversationHandler.END
+    
+    context.user_data['liking_job_config'] = {}
+    await update.message.reply_text(
+        "⚙️ لطفاً تنظیمات <b>لایک دنبال‌شوندگان</b> را مشخص کنید:\n\n"
+        "<b>مرحله ۱ از ۴:</b>\n"
+        "👥 چه تعداد از آخرین دنبال‌شوندگان شما بررسی شوند؟ (مثال: <code>50</code>)\n"
+        "<i>برای بررسی تمام دنبال‌شوندگان، عدد <b>0</b> را وارد کنید.</i>\n\n"
+        "برای لغو، روی /cancel کلیک کنید.",
+        parse_mode='HTML'
+    )
+    return FOLLOWING_GET_USER_COUNT
+
+async def liking_following_get_user_count(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """تعداد کاربران برای بررسی را دریافت می‌کند."""
+    try:
+        count = int(update.message.text.strip())
+        if count < 0: raise ValueError
+        context.user_data['liking_job_config']['users_to_check'] = count
+        await update.message.reply_text(
+            "👍 بسیار خب.\n\n"
+            "<b>مرحله ۲ از ۴:</b>\n"
+            "🔢 چه تعداد از آخرین پست‌های هر کاربر لایک شود؟ (مثال: <code>1</code>):\n\n"
+            "برای لغو، روی /cancel کلیک کنید.",
+            parse_mode='HTML'
+        )
+        return FOLLOWING_GET_POST_COUNT
+    except ValueError:
+        await update.message.reply_text("❌ لطفاً یک عدد صحیح (0 یا بیشتر) وارد کنید.")
+        return FOLLOWING_GET_USER_COUNT
+
+async def liking_following_get_post_count(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """تعداد پست‌ها برای هر کاربر را دریافت می‌کند."""
+    try:
+        count = int(update.message.text.strip())
+        if count <= 0: raise ValueError
+        context.user_data['liking_job_config']['posts_per_user'] = count
+        await update.message.reply_text(
+            "👍 بسیار خب.\n\n"
+            "<b>مرحله ۳ از ۴:</b>\n"
+            "⏱️ محدوده تاخیر بین درخواست‌ها را وارد کنید (مثال: <code>2,5</code>):\n\n"
+            "برای لغو، روی /cancel کلیک کنید.",
+            parse_mode='HTML'
+        )
+        return FOLLOWING_GET_DELAY
+    except ValueError:
+        await update.message.reply_text("❌ لطفاً یک عدد صحیح و مثبت وارد کنید.")
+        return FOLLOWING_GET_POST_COUNT
+
+async def liking_following_get_delay(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """محدوده تاخیر را دریافت می‌کند."""
+    try:
+        parts = [int(p.strip()) for p in update.message.text.split(',')]
+        if len(parts) != 2: raise ValueError
+        context.user_data['liking_job_config']['delay_range'] = [min(parts), max(parts)]
+        await update.message.reply_text(
+            "👍 عالی!\n\n"
+            "<b>مرحله ۴ از ۴:</b>\n"
+            "😴 در آخر، محدوده زمان انتظار (به ثانیه) بعد از هر لایک را وارد کنید (مثال: <code>5,15</code>):\n\n"
+            "برای لغو، روی /cancel کلیک کنید.",
+            parse_mode='HTML'
+        )
+        return FOLLOWING_GET_SLEEP
+    except (ValueError, IndexError):
+        await update.message.reply_text("❌ ورودی نامعتبر است. لطفاً دو عدد را با کاما جدا کنید (مثال: <code>2,5</code>).", parse_mode='HTML')
+        return FOLLOWING_GET_DELAY
+
+async def liking_following_get_sleep_and_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """محدوده خواب را دریافت و فرآیند لایک دنبال‌شوندگان را شروع می‌کند."""
+    try:
+        parts = [int(p.strip()) for p in update.message.text.split(',')]
+        if len(parts) != 2: raise ValueError
+        context.user_data['liking_job_config']['sleep_range'] = [min(parts), max(parts)]
+    except (ValueError, IndexError):
+        await update.message.reply_text("❌ ورودی نامعتبر است. لطفاً دو عدد را با کاما جدا کنید (مثال: <code>5,15</code>).", parse_mode='HTML')
+        return FOLLOWING_GET_SLEEP
+
+    context.user_data['liking_job'] = {
+        'is_running': True,
+        'mode': 'following',
+        'processed_items': 0,
+        'total_likes_done': 0,
+        'already_liked': 0,
+        'errors': 0,
+        'start_time': time.monotonic(),
+        'last_status': "در حال آماده‌سازی...",
+        'config': context.user_data.pop('liking_job_config')
+    }
+
+    await update.message.reply_text(f"🚀 شروع فرآیند لایک دنبال‌شوندگان...\nبرای لغو از /cancel_liking استفاده کنید.")
+    asyncio.create_task(liking_following_task(context))
+    return ConversationHandler.END
+
+@admin_only
 async def cancel_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """
     مکالمه فعلی (ورود یا تنظیمات) را لغو می کند.
@@ -484,7 +588,7 @@ async def cancel_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE
     await update.message.reply_text("🛑 عملیات فعلی لغو شد.", reply_markup=ReplyKeyboardRemove())
     
     # پاکسازی داده‌های موقت برای جلوگیری از تداخل
-    for key in ['instagram_username', 'password', 'verification_code', 'post_urls', 'delay_range', 'likes_per_user', 'sleep_range']:
+    for key in ['instagram_username', 'password', 'verification_code', 'liking_job_config']:
         if key in context.user_data:
             del context.user_data[key]
             
@@ -493,7 +597,7 @@ async def cancel_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE
 @admin_only
 async def request_cancel_liking(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """درخواست تایید برای لغو فرآیند لایک را ارسال می‌کند."""
-    if context.user_data.get('is_liking', False):
+    if context.user_data.get('liking_job', {}).get('is_running'):
         keyboard = [
             [
                 InlineKeyboardButton("✔️ بله، متوقف کن", callback_data='confirm_cancel_yes'),
@@ -512,8 +616,8 @@ async def handle_cancel_liking_confirmation(update: Update, context: ContextType
     await query.answer()
 
     if query.data == 'confirm_cancel_yes':
-        if context.user_data.get('is_liking', False):
-            context.user_data['is_liking'] = False
+        if context.user_data.get('liking_job', {}).get('is_running'):
+            context.user_data['liking_job']['is_running'] = False
             await query.edit_message_text("✋ فرآیند لایک در حال اجرا لغو شد.")
         else:
             await query.edit_message_text("🤔 فرآیند قبلاً متوقف شده بود.")
@@ -525,7 +629,6 @@ def main() -> None:
     """ربات را راه‌اندازی و اجرا می‌کند."""
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
-    # دستور لغو یکپارچه برای هر دو مکالمه
     cancel_conv_handler = CommandHandler('cancel', cancel_conversation)
 
     login_handler = ConversationHandler(
@@ -538,20 +641,30 @@ def main() -> None:
             LOGIN_GET_2FA_CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, login_get_2fa_code)],
         },
         fallbacks=[cancel_conv_handler],
-        per_message=False,
-        map_to_parent={ConversationHandler.END: ConversationHandler.END}
+        per_message=False
     )
-
-    liking_handler = ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex(r'instagram.com'), liking_setup_start)],
+    
+    liking_post_handler = ConversationHandler(
+        entry_points=[MessageHandler(filters.Regex(r'instagram.com'), liking_from_post_setup_start)],
         states={
-            LIKING_GET_DELAY: [MessageHandler(filters.TEXT & ~filters.COMMAND, liking_get_delay)],
-            LIKING_GET_COUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, liking_get_count)],
-            LIKING_GET_SLEEP: [MessageHandler(filters.TEXT & ~filters.COMMAND, liking_get_sleep_and_start)],
+            POST_LIKING_GET_POST_COUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, liking_from_post_get_post_count)],
+            POST_LIKING_GET_DELAY: [MessageHandler(filters.TEXT & ~filters.COMMAND, liking_from_post_get_delay)],
+            POST_LIKING_GET_SLEEP: [MessageHandler(filters.TEXT & ~filters.COMMAND, liking_from_post_get_sleep_and_start)],
         },
         fallbacks=[cancel_conv_handler],
-        per_message=False,
-        map_to_parent={ConversationHandler.END: ConversationHandler.END}
+        per_message=False
+    )
+
+    liking_following_handler = ConversationHandler(
+        entry_points=[CommandHandler('like_following', liking_following_setup_start)],
+        states={
+            FOLLOWING_GET_USER_COUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, liking_following_get_user_count)],
+            FOLLOWING_GET_POST_COUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, liking_following_get_post_count)],
+            FOLLOWING_GET_DELAY: [MessageHandler(filters.TEXT & ~filters.COMMAND, liking_following_get_delay)],
+            FOLLOWING_GET_SLEEP: [MessageHandler(filters.TEXT & ~filters.COMMAND, liking_following_get_sleep_and_start)],
+        },
+        fallbacks=[cancel_conv_handler],
+        per_message=False
     )
 
     application.add_handler(CommandHandler("start", start))
@@ -561,7 +674,8 @@ def main() -> None:
     application.add_handler(CommandHandler("cancel_liking", request_cancel_liking))
     application.add_handler(CallbackQueryHandler(handle_cancel_liking_confirmation, pattern=r'^confirm_cancel_'))
     application.add_handler(login_handler)
-    application.add_handler(liking_handler)
+    application.add_handler(liking_following_handler)
+    application.add_handler(liking_post_handler)
 
 
     application.run_polling()
