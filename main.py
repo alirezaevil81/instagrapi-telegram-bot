@@ -53,12 +53,16 @@ except ValueError:
 
 # تعریف مراحل مکالمه برای خوانایی بهتر
 (LOGIN_GET_USERNAME, LOGIN_HANDLE_SESSION, LOGIN_GET_PASSWORD, 
- LOGIN_HANDLE_2FA, LOGIN_GET_2FA_CODE) = range(5)
+ LOGIN_HANDLE_2FA, LOGIN_GET_2FA_CODE) = ("LOGIN_GET_USERNAME", "LOGIN_HANDLE_SESSION", 
+                                          "LOGIN_GET_PASSWORD", "LOGIN_HANDLE_2FA", "LOGIN_GET_2FA_CODE")
 
-(POST_LIKING_GET_POST_COUNT, POST_LIKING_GET_DELAY, POST_LIKING_GET_SLEEP) = range(5, 8)
+(POST_LIKING_GET_POST_COUNT, POST_LIKING_GET_DELAY, POST_LIKING_GET_SLEEP) = ("POST_LIKING_GET_POST_COUNT", 
+                                                                            "POST_LIKING_GET_DELAY", 
+                                                                            "POST_LIKING_GET_SLEEP")
 
 (FOLLOWING_GET_USER_COUNT, FOLLOWING_GET_POST_COUNT, 
- FOLLOWING_GET_DELAY, FOLLOWING_GET_SLEEP) = range(8, 12)
+ FOLLOWING_GET_DELAY, FOLLOWING_GET_SLEEP) = ("FOLLOWING_GET_USER_COUNT", "FOLLOWING_GET_POST_COUNT", 
+                                             "FOLLOWING_GET_DELAY", "FOLLOWING_GET_SLEEP")
 
 
 # --- Decorator برای محدود کردن دسترسی به ادمین ---
@@ -127,7 +131,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"👋 سلام <b>{user.mention_html()}</b>\n\n"
         "به ربات پیشرفته اینستاگرام خوش آمدید.\n\n"
         "<b>دستورات اصلی:</b>\n"
-        "/like_following - 👥 لایک کردن پست‌های دنبال‌شوندگان\n"
+        "/like_following - 👥 شروع لایک کردن پست‌های دنبال‌شوندگان\n"
         "/login - 🔑 ورود به حساب اینستاگرام\n"
         "/logout - 🚪 خروج از حساب فعلی\n"
         "/status - 📊 مشاهده وضعیت عملیات\n"
@@ -454,7 +458,7 @@ async def liking_from_post_get_sleep_and_start(update: Update, context: ContextT
             'is_running': True,
             'mode': 'post_likers',
             'processed_items': 0,
-            'total_likes_done': 0,
+            'likes_done': 0,
             'already_liked': 0,
             'errors': 0,
             'start_time': time.monotonic(),
@@ -564,21 +568,36 @@ async def liking_following_get_sleep_and_start(update: Update, context: ContextT
         await update.message.reply_text("❌ ورودی نامعتبر است. لطفاً دو عدد را با کاما جدا کنید (مثال: <code>5,15</code>).", parse_mode='HTML')
         return FOLLOWING_GET_SLEEP
 
-    context.user_data['liking_job'] = {
-        'is_running': True,
-        'mode': 'following',
-        'processed_items': 0,
-        'total_likes_done': 0,
-        'already_liked': 0,
-        'errors': 0,
-        'start_time': time.monotonic(),
-        'last_status': "در حال آماده‌سازی...",
-        'config': context.user_data.pop('liking_job_config')
-    }
+    chat_id = update.effective_chat.id
+    cl = context.user_data['client']
+    msg = await context.bot.send_message(chat_id, "⏳ در حال دریافت لیست دنبال‌شوندگان... لطفاً صبر کنید.")
+    
+    try:
+        users_to_check = context.user_data['liking_job_config']['users_to_check']
+        amount = users_to_check if users_to_check > 0 else 0
+        following_dict = await asyncio.to_thread(cl.user_following, cl.user_id, amount=amount)
+        users_to_process = list(following_dict.values())
 
-    await update.message.reply_text(f"🚀 شروع فرآیند لایک دنبال‌شوندگان...\nبرای لغو از /cancel_liking استفاده کنید.")
-    asyncio.create_task(liking_following_task(context))
-    return ConversationHandler.END
+        context.user_data['liking_job'] = {
+            'is_running': True,
+            'mode': 'following',
+            'processed_items': 0,
+            'likes_done': 0,
+            'already_liked': 0,
+            'errors': 0,
+            'start_time': time.monotonic(),
+            'last_status': "در حال آماده‌سازی...",
+            'users_to_process': users_to_process,
+            'config': context.user_data.pop('liking_job_config')
+        }
+
+        await msg.edit_text(f"🚀 تعداد کاربران برای بررسی: <b>{len(users_to_process)}</b>. شروع فرآیند لایک...\nبرای لغو از /cancel_liking استفاده کنید.", parse_mode='HTML')
+        asyncio.create_task(liking_task(context))
+        return ConversationHandler.END
+    except Exception as e:
+        await msg.edit_text(f"🚨 خطایی در دریافت لیست دنبال‌شوندگان رخ داد: {e}")
+        return ConversationHandler.END
+
 
 @admin_only
 async def cancel_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
